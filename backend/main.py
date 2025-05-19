@@ -1,83 +1,64 @@
-import json
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import logging
-from dotenv import load_dotenv
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain.vectorstores import Chroma
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.chat_models import ChatOpenAI
-from langchain.chains import create_qa_with_sources_chain, LLMChain
-from langchain.prompts import PromptTemplate
-from langchain.chains.combine_documents.stuff import StuffDocumentsChain
+import uvicorn
 
-def conversation_with_chatbot():
-    """Initialize the components for the conversational retrieval system."""
+from chatbot import conversation_with_chatbot
+from scrape import scrape_website
+from embed import embed_data
+
+app = FastAPI()
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Define routes
+@app.get('/')
+def index():
+    return 'Welcome to the FastAPI server!'
+
+@app.get('/api/scrape')
+async def scrape_website_embed(website_url: str):
     try:
-        # Load environment variables
-        load_dotenv()
-
-        # Configure logging
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger(__name__)
-
-        # Initialize components
-        db = Chroma(
-            persist_directory="./chroma",
-            embedding_function=OpenAIEmbeddings(model="text-embedding-ada-002"),
-        )
-        llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo")
-        memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-        # Define prompt templates
-        condense_question_prompt = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language. Make sure to avoid using any unclear pronouns.
-
-        Chat History:
-        {chat_history}
-        Follow Up Input: {question}
-        Standalone question:"""
-        condense_question_prompt = PromptTemplate.from_template(condense_question_prompt)
-        condense_question_chain = LLMChain(
-            llm=llm,
-            prompt=condense_question_prompt,
-        )
-
-        qa_chain = create_qa_with_sources_chain(llm)
-
-        doc_prompt = PromptTemplate(
-            template="Content: {page_content}\nSource: {source}",
-            input_variables=["page_content", "source"],
-        )
-
-        final_qa_chain = StuffDocumentsChain(
-            llm_chain=qa_chain,
-            document_variable_name="context",
-            document_prompt=doc_prompt,
-        )
-
-        # Create Conversational Retrieval Chain
-        retrieval_qa = ConversationalRetrievalChain(
-            question_generator=condense_question_chain,
-            retriever=db.as_retriever(),
-            memory=memory,
-            combine_docs_chain=final_qa_chain,
-        )
-
-        # Define prediction function
-        def predict(message):
-            response = retrieval_qa.run({"question": message})
-
-            response_dict = json.loads(response)
-            answer = response_dict["answer"]
-            sources = response_dict["sources"]
-
-            if isinstance(sources, list):
-                sources = "\n".join(sources)
-
-            if sources:
-                return f"{answer}\n\nSee more:\n{sources}"
-            return answer
-        
-        return predict
-
+        if website_url:
+            scrape_result = scrape_website(website_url)
+            if scrape_result:
+                embed_result = embed_data()
+                if embed_result:
+                    return {'msg': 'Success in scraping website'}
+            else:
+                raise HTTPException(status_code=404, detail='Failure in scraping website')
+        else:
+            raise HTTPException(status_code=404, detail='Please input the website url')
     except Exception as e:
         logger.error(f"An error occurred: {e}")
+        raise HTTPException(status_code=500, detail='Internal Server Error')
+    
+@app.get('/api/chat')
+async def chat_with_bot(user_message: str):
+    try:
+        if user_message:
+            predict_function = conversation_with_chatbot()
+            message = predict_function(user_message)
+            if message:
+                return message
+            else:
+                raise HTTPException(status_code=404, detail='Chatbot is not ready now')
+        else:
+            raise HTTPException(status_code=404, detail='What do you want')
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        raise HTTPException(status_code=500, detail='Internal Server Error')
+
+if __name__ == '__main__':
+    uvicorn.run(app, host="0.0.0.0", port=8000, debug=True)
